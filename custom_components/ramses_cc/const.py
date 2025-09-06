@@ -13,6 +13,7 @@ STORAGE_KEY: Final = DOMAIN
 # Dispatcher signals
 SIGNAL_NEW_DEVICES: Final = f"{DOMAIN}_new_devices_" + "{}"
 SIGNAL_UPDATE: Final = f"{DOMAIN}_update"
+SIGNAL_PARAM_SUPPORT_CHANGED: Final = f"{DOMAIN}_param_support_changed"
 
 # Config
 CONF_ADVANCED_FEATURES: Final = "advanced_features"

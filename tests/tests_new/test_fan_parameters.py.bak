@@ -1,0 +1,259 @@
+"""Tests for Ramses fan parameters configuration and device handling.
+
+This module contains tests for the fan parameters configuration handling,
+including the param_remote functionality and device association.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import AsyncGenerator
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from homeassistant.core import HomeAssistant
+
+from custom_components.ramses_cc.broker import RamsesBroker
+from custom_components.ramses_cc.fan_parameters import RamsesFanParametersDevice, async_setup_entry
+from custom_components.ramses_cc.const import DOMAIN, CONF_PARAM_REMOTE_ID, CONF_FAKE_DEVICES
+
+# Test constants
+TEST_FAN_DEVICE_ID = "01:123456"  # Example fan device ID
+TEST_REMOTE_DEVICE_ID = "12:789012"  # Example remote device ID
+TEST_FAKE_DEVICE_ID = "01:654321"  # Example fake device ID
+
+# Type aliases for better readability
+MockType = MagicMock
+AsyncMockType = AsyncMock
+
+class TestFanParametersConfig:
+    """Test cases for fan parameters configuration handling."""
+
+    @pytest.fixture(autouse=True)
+    async def setup_fixture(self, hass: HomeAssistant) -> AsyncGenerator[None, None]:
+        """Set up test environment.
+
+        This fixture runs before each test method and sets up:
+        - A real RamsesBroker instance
+        - A mock client with devices
+        - Patches for device registration
+
+        Args:
+            hass: Home Assistant fixture for creating a test environment.
+        """
+        # Create a real broker instance with a mock config entry
+        config_entry = MagicMock()
+        config_entry.entry_id = "test_entry_id"
+        self.broker = RamsesBroker(hass, config_entry)
+
+        # Register broker in hass data using the actual entry_id
+        hass.data[DOMAIN] = {
+            config_entry.entry_id: self.broker
+        }
+
+        # Create a mock client with devices
+        self.mock_client = AsyncMock()
+        self.broker.client = self.mock_client
+
+        # Create mock fan device
+        self.mock_fan = MagicMock()
+        self.mock_fan.id = TEST_FAN_DEVICE_ID
+        self.mock_fan.name = "Test Fan"
+        self.mock_fan.__class__.__name__ = "HvacVentilator"
+
+        # Create mock remote device
+        self.mock_remote = MagicMock()
+        self.mock_remote.id = TEST_REMOTE_DEVICE_ID
+        self.mock_remote.name = "Test Remote"
+
+        # Add devices to broker
+        self.broker._devices = {
+            TEST_FAN_DEVICE_ID: self.mock_fan,
+            TEST_REMOTE_DEVICE_ID: self.mock_remote,
+        }
+
+        # Patch device registration
+        self.patcher = patch("custom_components.ramses_cc.fan_parameters.RamsesFanParametersDevice")
+        self.mock_device_class = self.patcher.start()
+
+        yield  # Test runs here
+
+        # Cleanup - stop all patches
+        self.patcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_param_remote_basic(self, hass: HomeAssistant) -> None:
+        """Test basic param_remote configuration handling.
+
+        Verifies that:
+        1. The param_remote ID is correctly passed to the device
+        2. The device is created with the correct parameters
+        """
+        # Create a config entry with param_remote
+        entry = MagicMock()
+        entry.options = {
+            CONF_PARAM_REMOTE_ID: {
+                TEST_FAN_DEVICE_ID: TEST_REMOTE_DEVICE_ID
+            }
+        }
+
+        # Mock the async_add_entities callback
+        async_add_entities = AsyncMock()
+
+        # Act - Call the setup function
+        await async_setup_entry(
+            hass, entry, async_add_entities
+        )
+
+        # Assert - Verify device was created with correct parameters
+        self.mock_device_class.assert_called_once_with(
+            broker=self.broker,
+            device_id=TEST_FAN_DEVICE_ID,
+            name="Test Fan",
+            remote_device_id=TEST_REMOTE_DEVICE_ID,
+            fake_device_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_param_remote_with_fake(self, hass: HomeAssistant) -> None:
+        """Test param_remote configuration with fake device.
+
+        Verifies that:
+        1. Both param_remote and fake_device_id can be configured
+        2. The device is created with both IDs
+        """
+        # Create a config entry with both param_remote and fake device
+        entry = MagicMock()
+        entry.options = {
+            CONF_PARAM_REMOTE_ID: {
+                TEST_FAN_DEVICE_ID: TEST_REMOTE_DEVICE_ID
+            },
+            CONF_FAKE_DEVICES: {
+                TEST_FAN_DEVICE_ID: TEST_FAKE_DEVICE_ID
+            }
+        }
+
+        # Mock the async_add_entities callback
+        async_add_entities = AsyncMock()
+
+        # Act - Call the setup function
+        await async_setup_entry(
+            hass, entry, async_add_entities
+        )
+
+        # Assert - Verify device was created with both IDs
+        self.mock_device_class.assert_called_once_with(
+            broker=self.broker,
+            device_id=TEST_FAN_DEVICE_ID,
+            name="Test Fan",
+            remote_device_id=TEST_REMOTE_DEVICE_ID,
+            fake_device_id=TEST_FAKE_DEVICE_ID,
+        )
+
+    @pytest.mark.asyncio
+    async def test_param_remote_priority(self, hass: HomeAssistant) -> None:
+        """Test that param_remote takes precedence over fake_device_id.
+
+        Verifies that:
+        1. When both param_remote and fake_device_id are configured,
+           param_remote is used for parameter commands
+        2. The device is created with both IDs
+        """
+        # Create a config entry with both param_remote and fake device
+        entry = MagicMock()
+        entry.options = {
+            CONF_PARAM_REMOTE_ID: {
+                TEST_FAN_DEVICE_ID: TEST_REMOTE_DEVICE_ID
+            },
+            CONF_FAKE_DEVICES: {
+                TEST_FAN_DEVICE_ID: TEST_FAKE_DEVICE_ID
+            }
+        }
+        entry.entry_id = "test_entry_id"
+
+        # Create a device instance
+        device = RamsesFanParametersDevice(
+            broker=self.broker,
+            device_id=TEST_FAN_DEVICE_ID,
+            name="Test Fan",
+            remote_device_id=TEST_REMOTE_DEVICE_ID,
+            fake_device_id=TEST_FAKE_DEVICE_ID,
+        )
+
+        # Mock the broker's command methods
+        self.broker.async_get_fan_param = AsyncMock()
+        self.broker.async_set_fan_param = AsyncMock()
+
+        # Act - Call get parameter
+        await device.async_get_parameter_value("4E")
+
+        # Assert - Verify param_remote was used for command
+        self.broker.async_get_fan_param.assert_called_once()
+        call = self.broker.async_get_fan_param.call_args[0][0]
+        assert call.data["device_id"] == TEST_REMOTE_DEVICE_ID
+
+        # Reset mocks
+        self.broker.async_get_fan_param.reset_mock()
+
+        # Act - Call set parameter
+        await device.async_set_parameter_value("4E", "50")
+
+        # Assert - Verify param_remote was used for command
+        self.broker.async_set_fan_param.assert_called_once()
+        call = self.broker.async_set_fan_param.call_args[0][0]
+        assert call.data["device_id"] == TEST_REMOTE_DEVICE_ID
+
+    @pytest.mark.asyncio
+    async def test_param_remote_fallback(self, hass: HomeAssistant) -> None:
+        """Test fallback to fake_device_id when param_remote is not available.
+
+        Verifies that:
+        1. When param_remote is not available, fake_device_id is used
+        2. When neither is available, fan_device_id is used
+        """
+        # Create a config entry with param_remote and fake device
+        entry = MagicMock()
+        entry.options = {
+            CONF_PARAM_REMOTE_ID: {
+                TEST_FAN_DEVICE_ID: TEST_REMOTE_DEVICE_ID
+            },
+            CONF_FAKE_DEVICES: {
+                TEST_FAN_DEVICE_ID: TEST_FAKE_DEVICE_ID
+            }
+        }
+        entry.entry_id = "test_entry_id"
+
+        # Create a device instance
+        device = RamsesFanParametersDevice(
+            broker=self.broker,
+            device_id=TEST_FAN_DEVICE_ID,
+            name="Test Fan",
+            remote_device_id=TEST_REMOTE_DEVICE_ID,
+            fake_device_id=TEST_FAKE_DEVICE_ID,
+        )
+
+        # Mock the broker's command methods to raise exceptions
+        self.broker.async_get_fan_param = AsyncMock(side_effect=Exception("Remote failed"))
+        self.broker.async_set_fan_param = AsyncMock(side_effect=Exception("Remote failed"))
+
+        # Mock the device's logger
+        device._LOGGER = MagicMock()
+
+        # Act - Call get parameter
+        await device.async_get_parameter_value("4E")
+
+        # Assert - Verify fake device was used after remote failed
+        device._LOGGER.warning.assert_called_once()
+        assert "Remote failed" in str(device._LOGGER.warning.call_args[0])
+
+        # Reset mocks
+        self.broker.async_get_fan_param.reset_mock()
+        device._LOGGER.reset_mock()
+
+        # Act - Call set parameter
+        await device.async_set_parameter_value("4E", "50")
+
+        # Assert - Verify fake device was used after remote failed
+        device._LOGGER.warning.assert_called_once()
+        assert "Remote failed" in str(device._LOGGER.warning.call_args[0])

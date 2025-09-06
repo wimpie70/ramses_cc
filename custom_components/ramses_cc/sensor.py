@@ -151,7 +151,7 @@ class RamsesSensor(RamsesEntity, SensorEntity):
         # TODO: Should use dtm of last packet received, rather than is not None
         return (
             isinstance(self._device, Fakeable) and self._device.is_faked
-        ) or self.state is not None  # TODO: but what if None _is_ its state?
+        ) or self.state is not None  # TODO: but what if None _is_ its state? unknown ?
 
     @property
     def native_value(self) -> Any | None:

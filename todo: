@@ -1,0 +1,21 @@
+todo:
+
+away mode set_fan_param needs fix
+set_fan_param: get the bound rem if avail
+
+add script to get all params
+test with cleared cache
+test with fake fan
+check if we can be bound to a DIS, faked ?
+check if we need conversion for 75 in hvac set_fan_param
+
+check files:
+ramses_tx/command.py
+ramses_tx/const.py
+ramses_tx/schemas.py
+hvac.py
+
+broker.py
+number.py
+schemas.py
+init.py
