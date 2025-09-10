@@ -634,7 +634,7 @@ class RamsesBroker:
         _LOGGER.debug(f"Entity {target_entity_id} not found in any known location")
         return None
 
-    def _set_entity_pending(self, entity, param_id: str) -> None:
+    def _set_entity_pending(self, entity: Any, param_id: str) -> None:
         """Set an entity to pending state.
 
         Args:
@@ -653,7 +653,7 @@ class RamsesBroker:
                 "Failed to set pending state for parameter %s: %s", param_id, str(ex)
             )
 
-    def _clear_entity_pending(self, entity, param_id: str) -> None:
+    def _clear_entity_pending(self, entity: Any, param_id: str) -> None:
         """Clear pending state for an entity.
 
         Args:
@@ -674,7 +674,7 @@ class RamsesBroker:
             )
 
     async def _clear_pending_timeout(
-        self, entity, param_id: str, timeout: int = 30
+        self, entity: Any, param_id: str, timeout: int = 30
     ) -> None:
         """Clear pending state after a timeout if still set.
 

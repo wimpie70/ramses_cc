@@ -101,7 +101,7 @@ class RamsesNumber(RamsesEntity, NumberEntity):
         await self._request_parameter_value()
 
     @callback
-    def _async_param_updated(self, event):
+    def _async_param_updated(self, event) -> None:
         """Handle parameter updates from the device.
 
         This method is called when a fan parameter update event is received (for any 2411 entity).
@@ -160,7 +160,7 @@ class RamsesNumber(RamsesEntity, NumberEntity):
         self._param_native_value: dict[str, float | None] = {}
 
         # Initialize pending state
-        self._is_pending: bool = False
+        self._is_pending = False
         self._pending_value: float | None = None
 
         self.entity_id = ENTITY_ID_FORMAT.format(
@@ -312,7 +312,7 @@ class RamsesNumber(RamsesEntity, NumberEntity):
     @property
     def native_value(self) -> float | None:
         """Return the cached value."""
-        param_id = self.entity_description.ramses_rf_attr
+        param_id = getattr(self.entity_description, "ramses_rf_attr", "")
         if not param_id:
             _LOGGER.error("Cannot get value: missing parameter ID")
             return None

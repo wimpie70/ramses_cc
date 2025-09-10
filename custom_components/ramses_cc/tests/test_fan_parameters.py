@@ -4,12 +4,16 @@ import pytest
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+# Import the fan_parameters module with type ignore since it might not exist yet
+from custom_components.ramses_cc import fan_parameters  # type: ignore[attr-defined]
 from custom_components.ramses_cc.broker import RamsesBroker
-from custom_components.ramses_cc.fan_parameters import RamsesFanParametersDevice
+
+# Create a type alias for the device class
+RamsesFanParametersDevice = fan_parameters.RamsesFanParametersDevice  # type: ignore[attr-defined, no-any-return]
 
 
 @pytest.fixture
-async def mock_broker():
+async def mock_broker() -> RamsesBroker:
     """Mock broker instance."""
     broker = MagicMock(spec=RamsesBroker)
     broker.register_fan_param_handler = AsyncMock()
@@ -19,7 +23,7 @@ async def mock_broker():
 
 
 @pytest.fixture
-async def mock_device(mock_broker):
+async def mock_device(mock_broker: RamsesBroker) -> RamsesFanParametersDevice:
     """Mock fan device instance."""
     return RamsesFanParametersDevice(
         broker=mock_broker,
@@ -30,7 +34,7 @@ async def mock_device(mock_broker):
     )
 
 
-async def test_device_initialization(mock_device):
+async def test_device_initialization(mock_device: RamsesFanParametersDevice) -> None:
     """Test device initialization."""
     assert mock_device.fan_device_id == "01:123456"
     assert mock_device.name == "Test Fan Fan Parameters"
@@ -39,7 +43,7 @@ async def test_device_initialization(mock_device):
     assert mock_device.device_id == "01:123456"
 
 
-async def test_parameter_update(mock_device):
+async def test_parameter_update(mock_device: RamsesFanParametersDevice) -> None:
     """Test parameter update handling."""
     # Register callback
     callback = AsyncMock()
@@ -60,7 +64,9 @@ async def test_parameter_update(mock_device):
     callback.assert_called_once()  # Should still be 1 call
 
 
-async def test_get_parameter_value(mock_device, mock_broker):
+async def test_get_parameter_value(
+    mock_device: RamsesFanParametersDevice, mock_broker: RamsesBroker
+) -> None:
     """Test getting parameter value."""
     # Test getting parameter that exists
     mock_device._param_values["4E"] = "1"
@@ -75,7 +81,9 @@ async def test_get_parameter_value(mock_device, mock_broker):
     mock_broker.async_get_fan_param.assert_called_once()
 
 
-async def test_device_registration(mock_device, mock_broker):
+async def test_device_registration(
+    mock_device: RamsesFanParametersDevice, mock_broker: RamsesBroker
+) -> None:
     """Test device registration and unregistration."""
     # Test registration
     await mock_device.async_register()
@@ -86,7 +94,9 @@ async def test_device_registration(mock_device, mock_broker):
     mock_broker.unregister_fan_param_handler.assert_called_once()
 
 
-async def test_cleanup(mock_device, mock_broker):
+async def test_cleanup(
+    mock_device: RamsesFanParametersDevice, mock_broker: RamsesBroker
+) -> None:
     """Test device cleanup."""
     # Add some entities and callbacks
     mock_entity = MagicMock()
@@ -110,7 +120,9 @@ async def test_cleanup(mock_device, mock_broker):
     mock_broker.unregister_fan_param_handler.assert_called_once()
 
 
-async def test_async_setup_entry(hass: HomeAssistant, mock_broker):
+async def test_async_setup_entry(
+    hass: HomeAssistant, mock_broker: RamsesBroker
+) -> None:
     """Test async setup entry."""
     entry = MagicMock(spec=ConfigEntry)
     entry.options = {"param_remote_id": {"01:123456": "32:999999"}}

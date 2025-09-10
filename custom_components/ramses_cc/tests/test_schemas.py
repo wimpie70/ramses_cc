@@ -9,7 +9,7 @@ from custom_components.ramses_cc.schemas import (
 )
 
 
-def test_device_id_schema():
+def test_device_id_schema() -> None:
     """Test the device ID schema."""
     valid_ids = [
         "01:123456",
@@ -33,7 +33,7 @@ def test_device_id_schema():
             _SCH_DEVICE_ID(invalid_id)
 
 
-def test_command_code_schema():
+def test_command_code_schema() -> None:
     """Test the command code schema."""
     valid_codes = [
         "0000",
@@ -58,7 +58,7 @@ def test_command_code_schema():
             _SCH_CMD_CODE(invalid_code)
 
 
-def test_domain_config_schema():
+def test_domain_config_schema() -> None:
     """Test the domain configuration schema."""
     valid_config = {
         "ramses_rf": {"port_config": {"serial_port": "/dev/ttyUSB0"}},
@@ -98,7 +98,7 @@ def test_domain_config_schema():
         SCH_DOMAIN_CONFIG(invalid_config)
 
 
-def test_minimum_tcs_schema():
+def test_minimum_tcs_schema() -> None:
     """Test the minimum TCS schema."""
     valid_tcs = {
         "system": {"appliance_control": "10:123456"},
