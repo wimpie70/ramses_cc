@@ -84,6 +84,9 @@ from .typing import RamsesConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
+# PRESET_NONE is imported from HA as Any (follow_imports=skip); narrow it
+_PRESET_NONE: Final[str] = PRESET_NONE
+
 MODE_TCS_TO_HA: Final[dict[str, HVACMode]] = {
     SystemMode.AUTO: HVACMode.HEAT,  # NOTE: don't use AUTO
     SystemMode.HEAT_OFF: HVACMode.OFF,
@@ -348,7 +351,7 @@ class RamsesController(RamsesEntity, ClimateEntity):  # type: ignore[misc]
         system_mode = resolve_async_attr(self, self._device, "system_mode")
         if system_mode is None:
             # Fallback instead of returning None (unable to determine)
-            return PRESET_NONE
+            return _PRESET_NONE
         return PRESET_TCS_TO_HA.get(system_mode[SZ_SYSTEM_MODE])
 
     @property
@@ -728,7 +731,7 @@ class RamsesZone(RamsesEntity, ClimateEntity):  # type: ignore[misc]
         if mode[SZ_MODE] == ZoneMode.SCHEDULE:
             if system_mode is not None:
                 return PRESET_TCS_TO_HA.get(system_mode[SZ_SYSTEM_MODE])
-            return PRESET_NONE
+            return _PRESET_NONE
 
         return PRESET_ZONE_TO_HA.get(mode[SZ_MODE])
 

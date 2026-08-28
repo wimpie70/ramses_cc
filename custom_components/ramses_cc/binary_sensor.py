@@ -161,7 +161,8 @@ class RamsesBinarySensor(RamsesEntity, BinarySensorEntity):  # type: ignore[misc
         :rtype: str | None
         """
         if self.is_on:
-            return self.entity_description.icon
+            icon: str | None = self.entity_description.icon
+            return icon
         return self.entity_description.icon_off
 
 
