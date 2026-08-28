@@ -6,7 +6,7 @@ import json
 import logging
 from dataclasses import dataclass, replace as dc_replace
 from datetime import datetime as dt, timedelta as td
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import voluptuous as vol
 from homeassistant.components.climate import (
@@ -328,14 +328,16 @@ class RamsesController(RamsesEntity, ClimateEntity):  # type: ignore[misc]
         system_mode = resolve_async_attr(self, self._device, "system_mode")
         if system_mode is not None:
             if system_mode[SZ_SYSTEM_MODE] == SystemMode.HEAT_OFF:
-                return HVACMode.OFF
+                return cast(str | None, HVACMode.OFF)
             if system_mode[SZ_SYSTEM_MODE] == SystemMode.AWAY:
-                return HVACMode.AUTO  # users can't adjust setpoints away
+                return cast(
+                    str | None, HVACMode.AUTO
+                )  # users can't adjust setpoints away
 
         thermal_mode = resolve_async_attr(self, self._device, "thermal_mode")
         if thermal_mode == ThermalMode.COOL:
-            return HVACMode.COOL
-        return HVACMode.HEAT
+            return cast(str | None, HVACMode.COOL)
+        return cast(str | None, HVACMode.HEAT)
 
     @property
     def preset_mode(self) -> str | None:
@@ -651,9 +653,9 @@ class RamsesZone(RamsesEntity, ClimateEntity):  # type: ignore[misc]
         system_mode = resolve_async_attr(self, self._device.tcs, "system_mode")
         if system_mode is not None:
             if system_mode[SZ_SYSTEM_MODE] == SystemMode.AWAY:
-                return HVACMode.AUTO
+                return cast(str | None, HVACMode.AUTO)
             if system_mode[SZ_SYSTEM_MODE] == SystemMode.HEAT_OFF:
-                return HVACMode.OFF
+                return cast(str | None, HVACMode.OFF)
 
         mode = resolve_async_attr(self, self._device, "mode")
         if mode is None or mode.get(SZ_SETPOINT) is None:
@@ -668,12 +670,12 @@ class RamsesZone(RamsesEntity, ClimateEntity):  # type: ignore[misc]
             else 5.0
         )
         if mode[SZ_SETPOINT] <= min_temp:
-            return HVACMode.OFF
+            return cast(str | None, HVACMode.OFF)
 
         thermal_mode = resolve_async_attr(self, self._device, "thermal_mode")
         if thermal_mode == ThermalMode.COOL:
-            return HVACMode.COOL
-        return HVACMode.HEAT
+            return cast(str | None, HVACMode.COOL)
+        return cast(str | None, HVACMode.HEAT)
 
     @property
     def max_temp(self) -> float:
@@ -1262,7 +1264,7 @@ class RamsesHvac(RamsesEntity, ClimateEntity):  # type: ignore[misc]
 
         :return: The preset mode.
         """
-        return PRESET_NONE
+        return cast(str | None, PRESET_NONE)
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set new target fan mode for the HVAC device.
