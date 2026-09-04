@@ -3393,7 +3393,7 @@ async def test_migrate_entry_v2_to_v3(hass: HomeAssistant) -> None:
 
     result = await async_migrate_entry(hass, entry)
     assert result is True
-    assert entry.version == 4
+    assert entry.version == 3
 
     schema = entry.options[CONF_SCHEMA]
 
@@ -3450,7 +3450,7 @@ async def test_migrate_entry_v2_to_v3_saves_backup(
 
     result = await async_migrate_entry(hass, entry)
     assert result is True
-    assert entry.version == 4
+    assert entry.version == 3
 
     # Verify the backup was saved
     backup_store = Store(hass, 1, f"{DOMAIN}_migration_v2_backup")
@@ -3483,7 +3483,7 @@ async def test_migrate_entry_v2_to_v3_no_known_list(
 
     result = await async_migrate_entry(hass, entry)
     assert result is True
-    assert entry.version == 4
+    assert entry.version == 3
     # Schema unchanged — no known_list to merge
     assert entry.options[CONF_SCHEMA] == {"01:150000": {"_class": "CTL"}}
     # Passive scan still enabled even with no known_list
@@ -3511,7 +3511,7 @@ async def test_migrate_entry_v1_to_v3(hass: HomeAssistant) -> None:
 
     result = await async_migrate_entry(hass, entry)
     assert result is True
-    assert entry.version == 4
+    assert entry.version == 3
 
     # v1→v2: deprecated keys removed
     assert "file_name" not in entry.options.get("packet_log", {})
@@ -3959,7 +3959,7 @@ async def test_chained_config_entry_migration_v1_to_v3(
 
     # Assert
     assert result is True
-    assert config_entry.version == 4
+    assert config_entry.version == 3
     assert "file_name" not in config_entry.options.get("packet_log", {})
     assert (
         config_entry.options.get("packet_log", {}).get(
