@@ -2396,10 +2396,39 @@ class DiscoveryManager:
         Called periodically by the coordinator. Returns the list of
         newly discovered device IDs (status=NEW, not yet checked).
 
+        HGI discovery candidates (18: devices in the schema without
+        ``_owner``, added by ``_MqttHgiDiscoveryCallback``) are also
+        flagged as NEW here so the user gets a persistent notification
+        to review and accept them (issue 1119).
+
         :return: List of new device IDs that were found this round.
         """
         engine_devices = {d.device_id: d for d in self._scan.get_devices()}
         new_ids: list[str] = []
+
+        # HGI discovery candidates from MQTT are not in the scan engine
+        # (HGIs are gateways, not RF devices).  Flag them as NEW so
+        # they appear in the review form and trigger a notification.
+        for dev_id in self._schema_no_owner_ids:
+            if not dev_id.startswith("18:"):
+                continue
+            # Skip the active HGI — it's managed by the coordinator
+            if self._active_hgi_id and dev_id == self._active_hgi_id:
+                continue
+            meta = self._metadata.get(dev_id)
+            if meta is None:
+                self._metadata[dev_id] = DeviceMetadata()
+                new_ids.append(dev_id)
+                _LOGGER.info(
+                    "check_for_new_devices: HGI discovery candidate %s "
+                    "flagged for review (issue 1119)",
+                    dev_id,
+                )
+            elif (
+                meta.status == DiscoveryStatus.NEW
+                and dev_id not in self._notified
+            ):
+                new_ids.append(dev_id)
 
         for device_id in engine_devices:
             # Skip local active HGI gateway — it is managed directly by the
@@ -2612,6 +2641,11 @@ class DiscoveryManager:
 
         devices = self.get_devices()
         new_devices = [d for d in devices if d.device.device_id in new_ids]
+        # HGI discovery candidates (issue 1119) are not in the scan
+        # engine, so get_devices() won't return them.  Add synthetic
+        # entries for any new_ids that are missing.
+        known_ids = {d.device.device_id for d in new_devices}
+        missing_ids = sorted(did for did in new_ids if did not in known_ids)
 
         lines = [f"Found {len(new_ids)} new device(s):\n"]
         for entry in sorted(new_devices, key=lambda e: e.device.device_id):
@@ -2627,6 +2661,12 @@ class DiscoveryManager:
                 line += ", battery"
             line += ")"
             lines.append(line)
+        # Add HGI discovery candidates that aren't in the scan engine
+        for dev_id in missing_ids:
+            if dev_id.startswith("18:"):
+                lines.append(f"- `{dev_id}` (HGI — discovery candidate)")
+            else:
+                lines.append(f"- `{dev_id}`")
 
         lines.append(
             "\n[Review discovered devices]"
