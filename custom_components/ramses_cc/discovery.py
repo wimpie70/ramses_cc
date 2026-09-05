@@ -28,6 +28,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
+    HGI_PREFIX,
     SZ_DEVICE_COMMENTS,
     SZ_TR_BOUND,
     SZ_TR_CLASS,
@@ -372,7 +373,7 @@ class DiscoveryManager:
             )
             # HGI gateways (18:) are tracked but don't have zone bindings.
             # Still create comments for them (without zone/bound info).
-            if dev_id.startswith("18:"):
+            if dev_id.startswith(HGI_PREFIX):
                 if (
                     dev_id in result
                     and result[dev_id]
@@ -547,7 +548,7 @@ class DiscoveryManager:
                     and SZ_TR_OWNER not in entry
                     and dev_id.startswith(
                         (
-                            "18:",
+                            HGI_PREFIX,
                             "01:",
                             "04:",
                             "07:",
@@ -623,7 +624,7 @@ class DiscoveryManager:
                 # accepted yet.  Keep status NEW so they appear in the
                 # review form for the user to accept (issue 1119).
                 if (
-                    device_id.startswith("18:")
+                    device_id.startswith(HGI_PREFIX)
                     and device_id in self._schema_no_owner_ids
                 ):
                     _LOGGER.info(
@@ -641,7 +642,7 @@ class DiscoveryManager:
                         device_id,
                     )
             elif (
-                device_id.startswith("18:")
+                device_id.startswith(HGI_PREFIX)
                 and meta.status == DiscoveryStatus.LOST
             ):
                 # HGI gateways are never "lost" — they are the receiver,
@@ -721,7 +722,7 @@ class DiscoveryManager:
 
         for device_id, dev in scan_devices.items():
             # Skip HGI gateways — they're not classified by the scan engine
-            if device_id.startswith("18:"):
+            if device_id.startswith(HGI_PREFIX):
                 continue
 
             # Get the schema's _class for this device
@@ -914,7 +915,7 @@ class DiscoveryManager:
             # remote devices.  This also cleans up any pre-existing LOST
             # status that may have been set before the check_for_lost_devices
             # skip was added.
-            if entry.device.device_id.startswith("18:"):
+            if entry.device.device_id.startswith(HGI_PREFIX):
                 continue
             if entry.metadata.status == DiscoveryStatus.LOST:
                 result.append(entry)
@@ -938,7 +939,7 @@ class DiscoveryManager:
         mismatches: list[tuple[str, str, str]] = []
 
         for device_id, dev in scan_devices.items():
-            if device_id.startswith("18:"):
+            if device_id.startswith(HGI_PREFIX):
                 continue
 
             schema_entry = schema.get(device_id)
@@ -1016,7 +1017,7 @@ class DiscoveryManager:
         missing: list[str] = []
 
         for device_id, dev in scan_devices.items():
-            if device_id.startswith("18:"):
+            if device_id.startswith(HGI_PREFIX):
                 continue
 
             schema_entry = schema.get(device_id)
@@ -1093,7 +1094,7 @@ class DiscoveryManager:
         for device_id, schema_entry in schema.items():
             if not isinstance(schema_entry, dict):
                 continue
-            if device_id.startswith("18:"):
+            if device_id.startswith(HGI_PREFIX):
                 continue  # HGI — not a real device
             # Skip structural keys (main_tcs, _owner, etc.)
             if device_id.startswith("_") or device_id in ("main_tcs",):
@@ -1431,7 +1432,7 @@ class DiscoveryManager:
         for device in devices:
             device_id = str(device.id)
             # Skip HGI gateway — it is the receiver, not a remote device.
-            if device_id.startswith("18:"):
+            if device_id.startswith(HGI_PREFIX):
                 continue
             # Skip foreign-owner devices.
             if device_id in self._foreign_device_ids:
@@ -2410,7 +2411,7 @@ class DiscoveryManager:
         # (HGIs are gateways, not RF devices).  Flag them as NEW so
         # they appear in the review form and trigger a notification.
         for dev_id in self._schema_no_owner_ids:
-            if not dev_id.startswith("18:"):
+            if not dev_id.startswith(HGI_PREFIX):
                 continue
             # Skip the active HGI — it's managed by the coordinator
             if self._active_hgi_id and dev_id == self._active_hgi_id:
@@ -2502,6 +2503,12 @@ class DiscoveryManager:
         self._notified.update(new_ids)
 
         if new_ids and self._auto_notify:
+            _LOGGER.info(
+                "check_for_new_devices: sending notification for %d "
+                "new device(s): %s",
+                len(new_ids),
+                new_ids,
+            )
             self._send_notification(new_ids)
 
         return new_ids
@@ -2534,7 +2541,7 @@ class DiscoveryManager:
             # never be flagged as lost or offered for removal (the
             # remove_device service blocks gateway removal with a
             # ServiceValidationError).  Mirrors check_orphaned_devices.
-            if device_id.startswith("18:"):
+            if device_id.startswith(HGI_PREFIX):
                 continue
 
             # Skip faked devices — they are virtual/impersonated and don't
@@ -2663,7 +2670,7 @@ class DiscoveryManager:
             lines.append(line)
         # Add HGI discovery candidates that aren't in the scan engine
         for dev_id in missing_ids:
-            if dev_id.startswith("18:"):
+            if dev_id.startswith(HGI_PREFIX):
                 lines.append(f"- `{dev_id}` (HGI — discovery candidate)")
             else:
                 lines.append(f"- `{dev_id}`")
