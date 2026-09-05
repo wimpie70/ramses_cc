@@ -2404,6 +2404,13 @@ class DiscoveryManager:
 
         :return: List of new device IDs that were found this round.
         """
+        _LOGGER.debug(
+            "check_for_new_devices: called, _schema_no_owner_ids=%s, "
+            "_active_hgi_id=%s, _notified=%s",
+            self._schema_no_owner_ids,
+            self._active_hgi_id,
+            self._notified,
+        )
         engine_devices = {d.device_id: d for d in self._scan.get_devices()}
         new_ids: list[str] = []
 
@@ -2429,6 +2436,21 @@ class DiscoveryManager:
                 meta.status == DiscoveryStatus.NEW
                 and dev_id not in self._notified
             ):
+                new_ids.append(dev_id)
+            elif (
+                meta.status == DiscoveryStatus.ACCEPTED
+                and dev_id not in self._notified
+            ):
+                # Previously accepted but lost its _owner (e.g. user
+                # cleared _owner, or config was cleaned) — re-flag for
+                # review so the user can re-accept (issue 1119).
+                _LOGGER.info(
+                    "check_for_new_devices: HGI %s was accepted but "
+                    "has no _owner — re-flagging for review (issue 1119)",
+                    dev_id,
+                )
+                meta.status = DiscoveryStatus.NEW
+                self._metadata[dev_id] = meta
                 new_ids.append(dev_id)
 
         for device_id in engine_devices:
