@@ -2205,6 +2205,12 @@ class DiscoveryManager:
             entry = self.get_device(device_id)
             dev = entry.device if entry else None
             likely_type = dev.likely_type if dev else "unknown"
+            # HGI discovery candidates (from MQTT) are not in the scan
+            # engine, so dev is None and likely_type defaults to
+            # "unknown".  But 18: devices are always HGIs — use the
+            # prefix as the authoritative class (issue 1119).
+            if not dev and device_id.startswith(HGI_PREFIX):
+                likely_type = "HGI"
             bound_to = dev.bound_to if dev else None
             zone_index = dev.zone_index if dev else None
             domain_id = getattr(dev, "domain_id", None) if dev else None
