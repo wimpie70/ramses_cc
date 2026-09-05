@@ -29,7 +29,6 @@ from pytest_homeassistant_custom_component.common import (  # type: ignore[impor
 from serialx import SerialException
 
 from custom_components.ramses_cc.const import (
-    CONF_ACCEPTED_HGIS,
     CONF_ADDITIONAL_PORTS,
     CONF_ADVANCED_FEATURES,
     CONF_COMMANDS,
@@ -39,19 +38,21 @@ from custom_components.ramses_cc.const import (
     CONF_RAMSES_RF,
     CONF_SCHEMA,
     DEFAULT_HGI_ID,
-    DEFAULT_MQTT_TOPIC,
     DOMAIN,
     SIGNAL_NEW_DEVICES,
     SZ_ENFORCE_KNOWN_LIST,
+    SZ_OWNER,
     SZ_REMOTES,
     SZ_TR_CLASS,
     SZ_TR_COMMANDS,
+    SZ_TR_OWNER,
 )
 from custom_components.ramses_cc.coordinator import (
     SZ_CLIENT_STATE,
     SZ_PACKETS,
     SZ_SCHEMA,
     RamsesCoordinator,
+    _MqttHgiDiscoveryCallback,
 )
 from custom_components.ramses_cc.schemas import (
     SCH_GET_FAN_PARAM_DOMAIN,
@@ -1614,8 +1615,11 @@ async def test_create_client_mqtt_success(
     with (
         patch("custom_components.ramses_cc.coordinator.Gateway") as mock_gwy,
         patch(
-            "custom_components.ramses_cc.coordinator.RamsesMqttBridge"
+            "custom_components.ramses_cc.coordinator.RamsesMqttPoolBridge"
         ) as mock_bridge_cls,
+        patch(
+            "custom_components.ramses_cc.coordinator._MqttHgiDiscoveryCallback"
+        ),
     ):
         # Setup the mock bridge instance
         mock_bridge_instance = mock_bridge_cls.return_value
@@ -1626,11 +1630,8 @@ async def test_create_client_mqtt_success(
         # Call the method under test
         mock_coordinator._create_client({})
 
-        # 1. Verify Bridge Initialization
-        # It should use the default topic and ID from const
-        cast(Any, mock_bridge_cls).assert_called_once_with(
-            mock_coordinator.hass, DEFAULT_MQTT_TOPIC, DEFAULT_HGI_ID
-        )
+        # 1. Verify Pool Bridge Initialization
+        assert cast(Any, mock_bridge_cls).called
         assert mock_coordinator.mqtt_bridge is mock_bridge_instance
 
         # 2. Verify Gateway was initialised with MQTT-transport arguments
@@ -1694,49 +1695,36 @@ async def test_create_client_pool_transport(
     mock_coordinator.options[CONF_ADDITIONAL_PORTS] = [
         "mqtt://broker:1883/RAMSES/GATEWAY/18:001234"
     ]
-    mock_coordinator.options[CONF_ACCEPTED_HGIS] = ["18:001234"]
 
     with (
         patch("custom_components.ramses_cc.coordinator.Gateway") as mock_gwy,
         patch(
-            "ramses_tx.transport.pooled_transport_factory",
-            create=True,
-            new_callable=AsyncMock,
-        ) as mock_pool_factory,
+            "custom_components.ramses_cc.coordinator.RamsesMqttPoolBridge"
+        ) as mock_bridge_cls,
+        patch(
+            "custom_components.ramses_cc.coordinator._MqttHgiDiscoveryCallback"
+        ),
+        patch.object(
+            mock_coordinator.hass.config_entries,
+            "async_entries",
+            return_value=["mqtt"],
+        ),
     ):
         mock_client = mock_gwy.return_value
-        # Make the pool factory return a mock with set_accepted_hgis
-        mock_transport = MagicMock()
-        mock_pool_factory.return_value = mock_transport
+        mock_bridge = mock_bridge_cls.return_value
+        mock_bridge.async_transport_factory = MagicMock()
 
         # Act
         result = mock_coordinator._create_client({})
 
-        # Assert — Gateway called with transport_constructor
+        # Assert — Gateway called with transport_constructor from pool bridge
         cast(Any, mock_gwy).assert_called_once()
         _, kwargs = cast(Any, mock_gwy).call_args
         assert "transport_constructor" in kwargs
-        assert kwargs["port_name"] == "mqtt://broker:1883"
-
-        # The transport_constructor is a closure — verify it calls
-        # pooled_transport_factory with the right ports
-        constructor = kwargs["transport_constructor"]
-        assert callable(constructor)
-
-        # Call the constructor to verify it delegates to pool factory
-        await constructor(
-            protocol=MagicMock(),
-            config=MagicMock(),
-            extra=None,
-            loop=mock_coordinator.hass.loop,
+        assert (
+            kwargs["transport_constructor"]
+            == mock_bridge.async_transport_factory
         )
-
-        cast(Any, mock_pool_factory).assert_called_once()
-        _, pool_kwargs = cast(Any, mock_pool_factory).call_args
-        assert pool_kwargs["port_names"] == [
-            "mqtt://broker:1883",
-            "mqtt://broker:1883/RAMSES/GATEWAY/18:001234",
-        ]
 
         # Assert — result is the Gateway instance
         assert result is mock_client
@@ -6738,7 +6726,15 @@ def test_coordinator_derive_known_list_mqtt_url(
     }
     with (
         patch("custom_components.ramses_cc.coordinator.Gateway") as mock_gwy,
-        patch("custom_components.ramses_cc.coordinator.RamsesMqttBridge"),
+        patch("custom_components.ramses_cc.coordinator.RamsesMqttPoolBridge"),
+        patch(
+            "custom_components.ramses_cc.coordinator._MqttHgiDiscoveryCallback"
+        ),
+        patch.object(
+            mock_coordinator.hass.config_entries,
+            "async_entries",
+            return_value=["mqtt"],
+        ),
     ):
         mock_coordinator._create_client(config)
         assert mock_gwy.called
@@ -6925,7 +6921,6 @@ def test_create_pool_transport_constructor(
         port_name="mqtt://broker:1883",
         port_config={},
         additional_ports=["mqtt://broker:1883/RAMSES/GATEWAY/18:002222"],
-        accepted_hgis=None,
     )
     assert callable(constructor)
 
@@ -6951,10 +6946,14 @@ def test_create_client_filters_non_mqtt_ports(
 
     with (
         patch("custom_components.ramses_cc.coordinator.Gateway") as mock_gwy,
-        patch("custom_components.ramses_cc.coordinator.RamsesMqttBridge"),
+        patch("custom_components.ramses_cc.coordinator.RamsesMqttPoolBridge"),
         patch(
-            "ramses_tx.transport.pooled_transport_factory",
-            new_callable=AsyncMock,
+            "custom_components.ramses_cc.coordinator._MqttHgiDiscoveryCallback"
+        ),
+        patch.object(
+            mock_coordinator.hass.config_entries,
+            "async_entries",
+            return_value=["mqtt"],
         ),
     ):
         mock_coordinator._create_client(
@@ -6973,7 +6972,11 @@ def test_create_client_filters_non_mqtt_ports(
 def test_create_client_no_pool_for_single_mqtt(
     mock_coordinator: RamsesCoordinator,
 ) -> None:
-    """Test _create_client does not use pool for single MQTT without additional ports."""
+    """Test _create_client uses pool bridge even for single MQTT (issue 1119).
+
+    The pool bridge is always used for MQTT — even with a single HGI —
+    so the wildcard subscription and discovery callback are active.
+    """
     mock_coordinator.options = {
         SZ_SERIAL_PORT: {
             SZ_PORT_NAME: "mqtt://broker:1883/RAMSES/GATEWAY/18:001111"
@@ -6986,8 +6989,20 @@ def test_create_client_no_pool_for_single_mqtt(
 
     with (
         patch("custom_components.ramses_cc.coordinator.Gateway") as mock_gwy,
-        patch("custom_components.ramses_cc.coordinator.RamsesMqttBridge"),
+        patch(
+            "custom_components.ramses_cc.coordinator.RamsesMqttPoolBridge"
+        ) as mock_bridge_cls,
+        patch(
+            "custom_components.ramses_cc.coordinator._MqttHgiDiscoveryCallback"
+        ),
+        patch.object(
+            mock_coordinator.hass.config_entries,
+            "async_entries",
+            return_value=["mqtt"],
+        ),
     ):
+        mock_bridge = mock_bridge_cls.return_value
+        mock_bridge.async_transport_factory = MagicMock()
         mock_coordinator._create_client(
             {
                 SZ_SERIAL_PORT: {
@@ -6999,8 +7014,8 @@ def test_create_client_no_pool_for_single_mqtt(
         )
         assert mock_gwy.called
         kwargs = mock_gwy.call_args[1]
-        # No transport_constructor → no pool
-        assert "transport_constructor" not in kwargs
+        # Pool bridge always provides transport_constructor
+        assert "transport_constructor" in kwargs
 
 
 async def test_register_pool_hgis_with_pool_transport(
@@ -7164,7 +7179,6 @@ async def test_pool_constructor_invocation(
             port_name="mqtt://broker:1883",
             port_config={},
             additional_ports=["mqtt://broker:1883/RAMSES/GATEWAY/18:002222"],
-            accepted_hgis=None,
         )
         result = await constructor(
             MagicMock(),
@@ -7175,33 +7189,253 @@ async def test_pool_constructor_invocation(
         mock_factory.assert_called_once()
 
 
-async def test_pool_constructor_with_accepted_hgis(
+async def test_mqtt_hgi_discovery_callback_inserts_into_schema(
     mock_coordinator: RamsesCoordinator,
 ) -> None:
-    """Test the pool constructor applies accepted_hgis filter."""
-    try:
-        from ramses_tx.transport import pooled_transport_factory  # noqa: F401
-    except ImportError:
-        pytest.skip("pooled_transport_factory not in published ramses_tx")
-    mock_transport = MagicMock()
-    mock_transport.set_accepted_hgis = MagicMock()
+    """Test _MqttHgiDiscoveryCallback inserts unknown HGI into schema."""
+    # Start with empty schema
+    mock_coordinator.entry.options = {CONF_SCHEMA: {}}
 
-    with patch(
-        "ramses_tx.transport.pooled_transport_factory",
-        new_callable=AsyncMock,
-        return_value=mock_transport,
+    # Make async_update_entry actually update the entry options
+    def _update_entry(entry: Any, **kwargs: Any) -> None:
+        if "options" in kwargs:
+            entry.options = kwargs["options"]
+
+    mock_coordinator.hass.config_entries.async_update_entry.side_effect = (
+        _update_entry
+    )
+
+    callback = _MqttHgiDiscoveryCallback(mock_coordinator)
+    callback.on_unknown_hgi("18:999999", topic="RAMSES/GATEWAY/18:999999")
+
+    schema = mock_coordinator.entry.options.get(CONF_SCHEMA, {})
+    assert "18:999999" in schema
+    assert schema["18:999999"].get("_class") == "HGI"
+    # No _owner — it's a discovery candidate
+    assert SZ_TR_OWNER not in schema["18:999999"]
+
+
+async def test_mqtt_hgi_discovery_callback_does_not_overwrite(
+    mock_coordinator: RamsesCoordinator,
+) -> None:
+    """Test _MqttHgiDiscoveryCallback does not overwrite existing entries."""
+    # Start with schema that already has the HGI with an owner
+    mock_coordinator.entry.options = {
+        CONF_SCHEMA: {
+            SZ_OWNER: "me",
+            "18:999999": {
+                "_class": "HGI",
+                SZ_TR_OWNER: "me",
+            },
+        }
+    }
+
+    # Make async_update_entry actually update the entry options
+    def _update_entry(entry: Any, **kwargs: Any) -> None:
+        if "options" in kwargs:
+            entry.options = kwargs["options"]
+
+    mock_coordinator.hass.config_entries.async_update_entry.side_effect = (
+        _update_entry
+    )
+
+    callback = _MqttHgiDiscoveryCallback(mock_coordinator)
+    callback.on_unknown_hgi("18:999999", topic="RAMSES/GATEWAY/18:999999")
+
+    schema = mock_coordinator.entry.options.get(CONF_SCHEMA, {})
+    # Should still have the owner (not overwritten)
+    assert schema["18:999999"].get(SZ_TR_OWNER) == "me"
+
+
+# -- _get_accepted_hgi_ids tests (issue 1119) -----------------------------
+
+
+def test_get_accepted_hgi_ids_no_root_owner(
+    mock_coordinator: RamsesCoordinator,
+) -> None:
+    """Test _get_accepted_hgi_ids returns only primary when no root owner.
+
+    When the schema has no root _owner, no schema-derived HGI can be
+    proven to be owned by "me" — only the primary (configured transport)
+    is accepted.  Ownerless candidates remain receive-only.
+    """
+    mock_coordinator.options = {
+        SZ_SERIAL_PORT: {
+            SZ_PORT_NAME: "mqtt://broker:1883/RAMSES/GATEWAY/18:001111"
+        },
+        CONF_SCHEMA: {
+            # No SZ_OWNER at root
+            "18:001111": {"_class": "HGI"},  # ownerless
+            "18:002222": {"_class": "HGI"},  # ownerless
+        },
+    }
+    mock_coordinator.entry.options = mock_coordinator.options
+    accepted = mock_coordinator._get_accepted_hgi_ids()
+    # Only the primary HGI from the URL is accepted
+    assert accepted == {"18:001111"}
+
+
+def test_get_accepted_hgi_ids_with_root_owner(
+    mock_coordinator: RamsesCoordinator,
+) -> None:
+    """Test _get_accepted_hgi_ids accepts HGIs with matching owner."""
+    mock_coordinator.options = {
+        SZ_SERIAL_PORT: {
+            SZ_PORT_NAME: "mqtt://broker:1883/RAMSES/GATEWAY/18:001111"
+        },
+        CONF_SCHEMA: {
+            SZ_OWNER: "me",
+            "18:001111": {"_class": "HGI", SZ_TR_OWNER: "me"},
+            "18:002222": {"_class": "HGI", SZ_TR_OWNER: "me"},
+            "18:003333": {"_class": "HGI"},  # ownerless — not accepted
+            "18:004444": {"_class": "HGI", SZ_TR_OWNER: "other"},  # foreign
+        },
+    }
+    mock_coordinator.entry.options = mock_coordinator.options
+    accepted = mock_coordinator._get_accepted_hgi_ids()
+    assert "18:001111" in accepted
+    assert "18:002222" in accepted
+    assert "18:003333" not in accepted  # ownerless
+    assert "18:004444" not in accepted  # foreign owner
+
+
+def test_get_accepted_hgi_ids_empty_schema(
+    mock_coordinator: RamsesCoordinator,
+) -> None:
+    """Test _get_accepted_hgi_ids with empty schema returns just primary."""
+    mock_coordinator.options = {
+        SZ_SERIAL_PORT: {
+            SZ_PORT_NAME: "mqtt://broker:1883/RAMSES/GATEWAY/18:001111"
+        },
+        CONF_SCHEMA: {},
+    }
+    mock_coordinator.entry.options = mock_coordinator.options
+    accepted = mock_coordinator._get_accepted_hgi_ids()
+    assert accepted == {"18:001111"}
+
+
+def test_get_accepted_hgi_ids_non_dict_schema(
+    mock_coordinator: RamsesCoordinator,
+) -> None:
+    """Test _get_accepted_hgi_ids with non-dict schema returns empty set."""
+    mock_coordinator.options = {
+        SZ_SERIAL_PORT: {
+            SZ_PORT_NAME: "mqtt://broker:1883/RAMSES/GATEWAY/18:001111"
+        },
+        CONF_SCHEMA: "not_a_dict",  # invalid type
+    }
+    mock_coordinator.entry.options = mock_coordinator.options
+    accepted = mock_coordinator._get_accepted_hgi_ids()
+    assert accepted == set()
+
+
+def test_get_accepted_hgi_ids_no_primary(
+    mock_coordinator: RamsesCoordinator,
+) -> None:
+    """Test _get_accepted_hgi_ids with no primary returns only schema-accepted."""
+    mock_coordinator.options = {
+        SZ_SERIAL_PORT: {SZ_PORT_NAME: "/dev/ttyACM0"},
+        CONF_SCHEMA: {
+            SZ_OWNER: "me",
+            "18:002222": {"_class": "HGI", SZ_TR_OWNER: "me"},
+        },
+    }
+    mock_coordinator.entry.options = mock_coordinator.options
+    accepted = mock_coordinator._get_accepted_hgi_ids()
+    # Serial primary has no known HGI ID, so only schema-accepted
+    assert accepted == {"18:002222"}
+
+
+def test_get_accepted_hgi_ids_disabled_excluded(
+    mock_coordinator: RamsesCoordinator,
+) -> None:
+    """Test _get_accepted_hgi_ids excludes disabled HGIs."""
+    mock_coordinator.options = {
+        SZ_SERIAL_PORT: {
+            SZ_PORT_NAME: "mqtt://broker:1883/RAMSES/GATEWAY/18:001111"
+        },
+        CONF_SCHEMA: {
+            SZ_OWNER: "me",
+            "18:001111": {"_class": "HGI", SZ_TR_OWNER: "me"},
+            "18:002222": {
+                "_class": "HGI",
+                SZ_TR_OWNER: "me",
+                "_disabled": True,
+            },
+        },
+    }
+    mock_coordinator.entry.options = mock_coordinator.options
+    accepted = mock_coordinator._get_accepted_hgi_ids()
+    assert "18:001111" in accepted
+    assert "18:002222" not in accepted  # disabled
+
+
+# -- _extract_pool_hgis_from_schema with no root owner --------------------
+
+
+def test_extract_pool_hgis_no_root_owner(
+    mock_coordinator: RamsesCoordinator,
+) -> None:
+    """Test _extract_pool_hgis includes ownerless but not None==None accepted."""
+    mock_coordinator.options = {
+        SZ_SERIAL_PORT: {
+            SZ_PORT_NAME: "mqtt://broker:1883/RAMSES/GATEWAY/18:001111"
+        },
+        CONF_SCHEMA: {
+            # No SZ_OWNER at root
+            "18:001111": {
+                "_class": "HGI"
+            },  # ownerless — included as candidate
+            "18:002222": {
+                "_class": "HGI"
+            },  # ownerless — included as candidate
+        },
+    }
+    mock_coordinator.entry.options = mock_coordinator.options
+    pool_hgis = mock_coordinator._extract_pool_hgis_from_schema()
+    # Primary 18:001111 is excluded from pool_hgis (it's the primary)
+    # 18:002222 is included as a discovery candidate
+    assert "18:002222" in pool_hgis
+    assert "18:001111" not in pool_hgis  # primary is excluded
+
+
+# -- Serial primary + MQTT additional blocked (issue 1119) -----------------
+
+
+def test_create_client_serial_primary_ignores_mqtt_additional(
+    mock_coordinator: RamsesCoordinator,
+) -> None:
+    """Test serial primary + MQTT additional ports are ignored (no paho in HA)."""
+    mock_coordinator.options = {
+        SZ_SERIAL_PORT: {SZ_PORT_NAME: "/dev/ttyACM0"},
+        CONF_ADDITIONAL_PORTS: ["mqtt://broker:1883/RAMSES/GATEWAY/18:002222"],
+        CONF_RAMSES_RF: {},
+        CONF_SCHEMA: {},
+    }
+    mock_coordinator.entry.options = mock_coordinator.options
+
+    with (
+        patch("custom_components.ramses_cc.coordinator.Gateway") as mock_gwy,
+        patch.object(
+            mock_coordinator,
+            "_create_pool_transport_constructor",
+        ) as mock_pool_ctor,
+        patch(
+            "custom_components.ramses_cc.coordinator.extract_serial_port",
+            return_value=("/dev/ttyACM0", {}),
+        ),
     ):
-        constructor = mock_coordinator._create_pool_transport_constructor(
-            port_name="mqtt://broker:1883",
-            port_config={},
-            additional_ports=["mqtt://broker:1883/RAMSES/GATEWAY/18:002222"],
-            accepted_hgis=["18:001111", "18:002222"],
+        mock_coordinator._create_client(
+            {
+                SZ_SERIAL_PORT: {SZ_PORT_NAME: "/dev/ttyACM0"},
+                CONF_ADDITIONAL_PORTS: [
+                    "mqtt://broker:1883/RAMSES/GATEWAY/18:002222"
+                ],
+                CONF_RAMSES_RF: {},
+                CONF_SCHEMA: {},
+            }
         )
-        await constructor(
-            MagicMock(),
-            config=TransportConfig(),
-            loop=asyncio.get_event_loop(),
-        )
-        mock_transport.set_accepted_hgis.assert_called_once_with(
-            ["18:001111", "18:002222"]
-        )
+        assert mock_gwy.called
+        # Pool constructor should NOT be called — MQTT additional ports
+        # are ignored for serial primary (no paho in HA).
+        mock_pool_ctor.assert_not_called()

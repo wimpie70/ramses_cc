@@ -78,9 +78,9 @@ from ramses_tx.config import EngineConfig
 from ramses_tx.const import SZ_ACTIVE_HGI, Code
 from ramses_tx.dtos import PacketDTO
 from ramses_tx.schemas import extract_serial_port
+from ramses_tx.typing import DeviceIdT
 
 from .const import (
-    CONF_ACCEPTED_HGIS,
     CONF_ADDITIONAL_PORTS,
     CONF_ADVANCED_FEATURES,
     CONF_AUTO_NOTIFY,
@@ -96,9 +96,12 @@ from .const import (
     CONF_SCAN_INTERVAL,
     CONF_SCHEMA,
     CONF_SSOT_MIGRATED,
+    CONF_WAIT_ONLINE_TIMEOUT,
     DEFAULT_HGI_ID,
     DEFAULT_MQTT_TOPIC,
+    DEFAULT_WAIT_ONLINE_TIMEOUT,
     DOMAIN,
+    HGI_PREFIX,
     SIGNAL_NEW_DEVICES,
     SIGNAL_UPDATE,
     STORAGE_KEY,
@@ -127,6 +130,7 @@ from .discovery import DiscoveryManager
 from .fan_handler import RamsesFanHandler
 from .helpers import clear_async_attr_cache
 from .mqtt_bridge import RamsesMqttBridge
+from .mqtt_pool_bridge import RamsesMqttPoolBridge
 from .schemas import (
     _SCHEMA_EXTENSION_KEYS,
     _strip_and_orchestrate,
@@ -207,6 +211,65 @@ def _normalize_class_slug(value: str) -> str:
 _T_Entity = TypeVar("_T_Entity", bound=RamsesRFEntity)
 
 
+class _MqttHgiDiscoveryCallback:
+    """Receive unknown-HGI notifications from the MQTT pool bridge.
+
+    Implements the ``MqttDiscoveryCallback`` protocol from
+    ``ramses_tx.transport.callbacks``.  An unknown HGI observed on the
+    wildcard topic is logged and flagged for review by the discovery
+    manager; it does **not** create a ``PoolChild`` or become routable
+    until the user accepts it and the config entry reloads.
+    """
+
+    def __init__(self, coordinator: RamsesCoordinator) -> None:
+        self._coordinator = coordinator
+
+    def on_unknown_hgi(
+        self,
+        hgi_id: DeviceIdT,
+        *,
+        topic: str | None = None,
+    ) -> None:
+        """Report an unknown HGI observed on the wildcard topic.
+
+        Inserts the HGI into the schema as a discovery candidate
+        (``_class: HGI``, no ``_owner``) so the discovery manager's
+        periodic checkpoint can prompt the user to accept or reject
+        it.  The HGI does **not** become a pool member or routable
+        until the user accepts it (sets ``_owner``) and the config
+        entry reloads.
+        """
+        hgi_str = str(hgi_id)
+        _LOGGER.info(
+            "MqttPoolBridge: unknown HGI %s observed on topic %s "
+            "(adding as discovery candidate, not added to pool)",
+            hgi_str,
+            topic,
+        )
+        # Insert into schema as a discovery candidate (no _owner).
+        # This makes sync_with_schema → check_for_new_devices flag
+        # it for review on the next checkpoint cycle.
+        raw_schema = self._coordinator.entry.options.get(CONF_SCHEMA, {})
+        if not isinstance(raw_schema, dict):
+            return
+        schema = dict(raw_schema)
+        # Only add if not already present (don't overwrite existing
+        # entries — the user may have already rejected it).
+        if hgi_str not in schema:
+            schema[hgi_str] = {"_class": "HGI"}
+            # No _owner — this is a discovery candidate.
+            new_options = dict(self._coordinator.entry.options)
+            new_options[CONF_SCHEMA] = schema
+            self._coordinator.hass.config_entries.async_update_entry(
+                self._coordinator.entry, options=new_options
+            )
+            _LOGGER.info(
+                "MqttPoolBridge: added HGI %s to schema as "
+                "discovery candidate (no _owner)",
+                hgi_str,
+            )
+
+
 class RamsesCoordinator(DataUpdateCoordinator):
     """Central coordinator for the RAMSES integration."""
 
@@ -220,7 +283,7 @@ class RamsesCoordinator(DataUpdateCoordinator):
         # Initialize handlers
         self.fan_handler = RamsesFanHandler(self)
         self.service_handler = RamsesServiceHandler(self)
-        self.mqtt_bridge: RamsesMqttBridge | None = None
+        self.mqtt_bridge: RamsesMqttBridge | RamsesMqttPoolBridge | None = None
         self.discovery_manager: DiscoveryManager | None = None
         self._cached_discovery_state: dict[str, Any] | None = None
         self._suppress_reload: float = 0.0  # timestamp; >0 means suppressed
@@ -759,7 +822,7 @@ class RamsesCoordinator(DataUpdateCoordinator):
         schema_changed = False
         for dev_id, entry in schema.items():
             if (
-                dev_id.startswith("18:")
+                dev_id.startswith(HGI_PREFIX)
                 and isinstance(entry, dict)
                 and entry.get("_class", "").upper() == "HGI"
             ):
@@ -1192,7 +1255,7 @@ class RamsesCoordinator(DataUpdateCoordinator):
         pool_hgis: list[str] = []
         for dev_id, entry in schema.items():
             if not (
-                dev_id.startswith("18:")
+                dev_id.startswith(HGI_PREFIX)
                 and isinstance(entry, dict)
                 and entry.get("_class", "").upper() == "HGI"
                 and not entry.get("_disabled")
@@ -1200,8 +1263,11 @@ class RamsesCoordinator(DataUpdateCoordinator):
             ):
                 continue
             owner = entry.get(SZ_TR_OWNER)
-            if owner == root_owner:
-                # Accepted pool member — full send + receive
+            if owner is not None and owner == root_owner:
+                # Accepted pool member — full send + receive.
+                # Guard against None == None: when the schema has no
+                # root _owner, no HGI is "accepted" via this branch
+                # (issue 1119).
                 pool_hgis.append(dev_id)
             elif owner is None:
                 # Discovery candidate — receive-only so packets are
@@ -1211,6 +1277,41 @@ class RamsesCoordinator(DataUpdateCoordinator):
                 pool_hgis.append(dev_id)
             # HGIs with a foreign owner are excluded
         return pool_hgis
+
+    def _get_accepted_hgi_ids(self) -> set[str]:
+        """Return the set of accepted HGI IDs (including primary).
+
+        Accepted HGIs have ``_owner`` matching the root ``_owner``.
+        Ownerless discovery candidates are excluded — they are
+        receive-only and cannot transmit until accepted.
+
+        :return: Set of accepted HGI device IDs.
+        """
+        schema = self.entry.options.get(CONF_SCHEMA, {})
+        if not isinstance(schema, dict):
+            return set()
+        root_owner = schema.get(SZ_OWNER)
+        primary_hgi = self._get_primary_hgi_id()
+        accepted: set[str] = set()
+        if primary_hgi:
+            accepted.add(primary_hgi)
+        # When the schema has no root _owner, no schema-derived HGI can
+        # be proven to be owned by "me" — only the primary (configured
+        # transport) is accepted.  Ownerless candidates remain
+        # receive-only (issue 1119).
+        if root_owner is None:
+            return accepted
+        for dev_id, entry in schema.items():
+            if not (
+                dev_id.startswith(HGI_PREFIX)
+                and isinstance(entry, dict)
+                and entry.get("_class", "").upper() == "HGI"
+                and not entry.get("_disabled")
+            ):
+                continue
+            if entry.get(SZ_TR_OWNER) == root_owner:
+                accepted.add(dev_id)
+        return accepted
 
     def _get_primary_hgi_id(self) -> str | None:
         """Return the primary HGI ID from the transport config.
@@ -1241,7 +1342,7 @@ class RamsesCoordinator(DataUpdateCoordinator):
                     if root_owner:
                         for dev_id, entry in schema.items():
                             if (
-                                dev_id.startswith("18:")
+                                dev_id.startswith(HGI_PREFIX)
                                 and isinstance(entry, dict)
                                 and entry.get("_class", "").upper() == "HGI"
                                 and entry.get(SZ_TR_OWNER) == root_owner
@@ -2012,11 +2113,26 @@ class RamsesCoordinator(DataUpdateCoordinator):
         _is_mqtt_ha_port = (
             isinstance(_port_name_raw, str) and _port_name_raw == "mqtt_ha"
         )
+        # A mqtt:// URL is a legacy paho-style config.  Inside HA, we
+        # always use the HA MQTT integration (homeassistant.components.mqtt)
+        # — no direct paho clients (issue 1119, plan §Phase 1).  If an HA
+        # MQTT integration is configured, treat mqtt:// URLs as HA MQTT
+        # and extract the topic/HGI ID from the URL path.
+        _is_mqtt_url = isinstance(
+            _port_name_raw, str
+        ) and _port_name_raw.startswith("mqtt://")
+        _has_ha_mqtt = bool(self.hass.config_entries.async_entries("mqtt"))
+        if _is_mqtt_url and _has_ha_mqtt:
+            _is_mqtt_ha_port = True
+            _LOGGER.info(
+                "Legacy mqtt:// URL detected (%s); routing to HA MQTT "
+                "integration (no paho inside HA — issue 1119)",
+                _port_name_raw,
+            )
         _is_mqtt_flag = bool(self.options.get(CONF_MQTT_USE_HA))
 
         if not _port_name_raw:
-            mqtt_entries = self.hass.config_entries.async_entries("mqtt")
-            if mqtt_entries:
+            if _has_ha_mqtt:
                 _LOGGER.warning(
                     "No serial_port configured; defaulting to Home Assistant "
                     "MQTT transport. Please re-open options & re-save."
@@ -2042,20 +2158,35 @@ class RamsesCoordinator(DataUpdateCoordinator):
         # (from CONF_MQTT_HGI_ID or embedded in the mqtt:// URL).
         hgi_id: str | None = None
         if _is_mqtt_ha:
-            hgi_id = self.options.get(CONF_MQTT_HGI_ID, DEFAULT_HGI_ID)
-        elif isinstance(_port_name_raw, str) and _port_name_raw.startswith(
-            "mqtt://"
-        ):
-            # Custom mqtt:// URL — extract HGI ID from the URL path
-            # (e.g. mqtt://user:pass@host:1883/topic/18:001234)
-            if self.options.get(CONF_MQTT_HGI_ID):
-                hgi_id = self.options.get(CONF_MQTT_HGI_ID)
-            else:
+            hgi_id = self.options.get(CONF_MQTT_HGI_ID)
+            if not hgi_id and _is_mqtt_url:
+                # Extract HGI ID from the mqtt:// URL path
+                # (e.g. mqtt://user:pass@host:1883/topic/18:001234)
                 import re as _re
 
                 m = _re.search(r"(18:[0-9]{6})(?:/|$)", _port_name_raw)
                 if m:
                     hgi_id = m.group(1)
+            if not hgi_id:
+                hgi_id = DEFAULT_HGI_ID
+            # Also extract the MQTT topic from the URL if not already set
+            if not self.options.get(CONF_MQTT_TOPIC) and _is_mqtt_url:
+                import re as _re
+
+                # Topic is the path after the host:port, before the HGI ID
+                # e.g. mqtt://host:1883/RAMSES/GATEWAY/18:001234 -> RAMSES/GATEWAY
+                m = _re.search(
+                    r"mqtt://[^/]+/(.+?)/18:[0-9]{6}(?:/|$)",
+                    _port_name_raw,
+                )
+                if m:
+                    topic = m.group(1).rstrip("/")
+                    if topic:
+                        self.options[CONF_MQTT_TOPIC] = topic
+                        _LOGGER.info(
+                            "Extracted MQTT topic '%s' from mqtt:// URL",
+                            topic,
+                        )
         if hgi_id:
             device_entry = sanitized_known_list.setdefault(hgi_id, {})
             device_entry["class"] = "HGI"
@@ -2088,23 +2219,48 @@ class RamsesCoordinator(DataUpdateCoordinator):
             # In the _is_mqtt_ha branch it's set from CONF_MQTT_HGI_ID.
             assert hgi_id is not None
 
-            self.mqtt_bridge = RamsesMqttBridge(self.hass, mqtt_topic, hgi_id)
+            # Check for additional configured HGIs from the schema.
+            # Always use the pool bridge for MQTT — even with a single
+            # HGI, the pool bridge subscribes to the wildcard topic and
+            # can discover unknown HGIs via the discovery callback.
+            schema_pool_hgis = self._extract_pool_hgis_from_schema()
+            all_hgi_ids = [hgi_id]
+            for extra_hgi in schema_pool_hgis:
+                if extra_hgi not in all_hgi_ids:
+                    all_hgi_ids.append(extra_hgi)
 
-            # Ensure the bridge unsubscribes from MQTT on shutdown
+            _LOGGER.info(
+                "MqttPoolBridge: %d configured HGI(s): %s",
+                len(all_hgi_ids),
+                all_hgi_ids,
+            )
+            self.mqtt_bridge = RamsesMqttPoolBridge(
+                self.hass,
+                mqtt_topic,
+                all_hgi_ids,
+                discovery_callback=_MqttHgiDiscoveryCallback(self),
+                wait_online_timeout=float(
+                    self.options.get(
+                        CONF_WAIT_ONLINE_TIMEOUT,
+                        DEFAULT_WAIT_ONLINE_TIMEOUT,
+                    )
+                ),
+                accepted_hgi_ids=self._get_accepted_hgi_ids(),
+            )
             self.entry.async_on_unload(self.mqtt_bridge.close)
 
-            # Pass the configured HGI ID to ramses_rf.
             engine_kwargs["hgi_id"] = hgi_id
             self._port_name = str(_port_name_raw or "mqtt")
 
             engine_config = EngineConfig(**engine_kwargs)
             gwy_config = GatewayConfig(engine=engine_config, **gateway_kwargs)
-
             return Gateway(
                 port_name=_port_name_raw or "mqtt",
                 config=gwy_config,
                 loop=self.hass.loop,
-                transport_constructor=self.mqtt_bridge.async_transport_factory,
+                transport_constructor=(
+                    self.mqtt_bridge.async_transport_factory
+                ),
             )
 
         # Standard Serial/USB setup
@@ -2128,27 +2284,45 @@ class RamsesCoordinator(DataUpdateCoordinator):
         # For MQTT transports, also check the schema for accepted HGIs
         # that share the same broker.  Each accepted HGI gets its own
         # child transport with an explicit per-HGI MQTT URL (issue 1119).
+        # For hybrid setups (serial primary + MQTT additional), the
+        # MQTT broker URL is added to additional_ports via the config
+        # flow (manage_pool_mqtt step).
         schema_accepted_hgis: list[str] = []
         if isinstance(port_name, str) and port_name.startswith("mqtt://"):
             schema_accepted_hgis = self._extract_pool_hgis_from_schema()
 
         # Merge additional_ports and schema-derived HGI ports.
-        # Phase 1: only MQTT pool children are supported.  Serial and
-        # Zigbee are gated in the config flow, but filter defensively
-        # here too in case stale config entries exist.
-        # TODO: re-enable serial when Phase 2 (PR 3) lands.
+        # Phase 1: only MQTT pool children are supported, and only
+        # when the primary transport is also MQTT (via the HA-native
+        # RamsesMqttPoolBridge).  When the primary is serial/USB,
+        # MQTT additional ports would require paho-mqtt inside HA,
+        # which is not allowed — ramses_cc must use HA's MQTT
+        # integration exclusively (issue 1119).
+        # TODO: re-enable serial pool when Phase 2 (PR 3) lands.
         # TODO: re-enable zigbee when Phase 3 (PR 6) lands.
-        all_additional_ports = [
+        all_additional_ports: list[str] = []
+        mqtt_additional = [
             p
             for p in additional_ports
             if isinstance(p, str) and p.startswith("mqtt://")
         ]
+        if mqtt_additional:
+            _LOGGER.warning(
+                "Serial primary + MQTT additional ports is not "
+                "supported in Phase 1 (ramses_cc must not use paho). "
+                "Ignoring MQTT additional ports: %s",
+                mqtt_additional,
+            )
+        # Schema-derived HGI ports are only valid when the primary
+        # is MQTT — they share the same broker/topic.  When the
+        # primary is serial, schema HGIs are handled via the
+        # discovery callback on the HA MQTT integration, not via
+        # paho transports.
         if schema_accepted_hgis:
-            # Construct explicit MQTT URLs for schema-accepted HGIs
-            for hgi_id in schema_accepted_hgis:
-                explicit_url = self._build_explicit_mqtt_url(port_name, hgi_id)
-                if explicit_url and explicit_url not in all_additional_ports:
-                    all_additional_ports.append(explicit_url)
+            _LOGGER.debug(
+                "Schema HGI ports ignored for serial primary: %s",
+                schema_accepted_hgis,
+            )
 
         _LOGGER.debug(
             "Gateway pool check: additional_ports=%s, schema_hgis=%s, "
@@ -2159,14 +2333,10 @@ class RamsesCoordinator(DataUpdateCoordinator):
             port_name,
         )
         if all_additional_ports:
-            accepted_hgis: list[str] | None = self.options.get(
-                CONF_ACCEPTED_HGIS
-            )
             pool_constructor = self._create_pool_transport_constructor(
                 port_name=port_name,
                 port_config=port_config,
                 additional_ports=all_additional_ports,
-                accepted_hgis=accepted_hgis,
             )
             engine_config = EngineConfig(**engine_kwargs)
             gwy_config = GatewayConfig(engine=engine_config, **gateway_kwargs)
@@ -2225,7 +2395,6 @@ class RamsesCoordinator(DataUpdateCoordinator):
         port_name: str,
         port_config: dict[str, Any],
         additional_ports: list[str],
-        accepted_hgis: list[str] | None,
     ) -> Callable[..., Awaitable[Any]]:
         """Create a transport_constructor for the gateway pool.
 
@@ -2240,9 +2409,6 @@ class RamsesCoordinator(DataUpdateCoordinator):
         :type port_config: dict[str, Any]
         :param additional_ports: List of additional port names.
         :type additional_ports: list[str]
-        :param accepted_hgis: Optional list of accepted HGI IDs for
-            packet filtering.  When ``None``, all HGIs are accepted.
-        :type accepted_hgis: list[str] | None
         :returns: An async transport constructor callable.
         :rtype: Callable[..., Awaitable[Any]]
         """
@@ -2289,14 +2455,6 @@ class RamsesCoordinator(DataUpdateCoordinator):
                 extra=extra,
                 loop=loop or self.hass.loop,
             )
-
-            # Apply accepted_hgis filter if configured
-            if accepted_hgis and hasattr(transport, "set_accepted_hgis"):
-                transport.set_accepted_hgis(accepted_hgis)
-                _LOGGER.debug(
-                    "PooledTransport: accepted_hgis set to %s",
-                    accepted_hgis,
-                )
 
             return transport
 
