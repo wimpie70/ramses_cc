@@ -1762,6 +1762,25 @@ class RamsesServiceHandler:
         #    enforce_known_list allows packet processing and device creation
         client = self._coordinator.client
         if client:
+            # The known_list is derived from the schema only at gateway
+            # setup — a device added at runtime must have its schema
+            # traits pushed into the live known_list *before* its packets
+            # can reach the registry, or get_device() creates it without
+            # _class/_faked and it lands as a generic non-fakeable
+            # DeviceHvac (e.g. a faked REM cannot bind or unbind on-air,
+            # issue 1283).
+            known_list = getattr(client.config, "known_list", None)
+            if isinstance(known_list, dict):
+                traits = self._coordinator.derive_known_list_from_schema(
+                    merged
+                ).get(device_id)
+                if traits is not None:
+                    known_list[device_id] = traits
+                else:
+                    # skipped/foreign devices are excluded from the
+                    # derived known_list — drop any stale entry
+                    known_list.pop(device_id, None)
+
             add_to_include_lists(client, device_id)
 
         _LOGGER.debug(
