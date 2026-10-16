@@ -35,12 +35,14 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.dispatcher import dispatcher_send
 from homeassistant.util import dt as dt_util
 
 from ramses_tx.address import is_hgi_id
 
 from .const import (
     DEFAULT_HGI_ID,
+    SIGNAL_UPDATE,
     SZ_DEVICE_COMMENTS,
     SZ_TR_BOUND,
     SZ_TR_CLASS,
@@ -835,6 +837,7 @@ class DiscoveryManager:
                 ):
                     existing_meta.class_mismatch = None
                     self.metadata[device_id] = existing_meta
+                    self._signal_metadata_change(device_id)
                 continue
 
             # Get the scan engine's likely_type
@@ -883,6 +886,7 @@ class DiscoveryManager:
                 ):
                     existing_meta.class_mismatch = None
                     self.metadata[device_id] = existing_meta
+                    self._signal_metadata_change(device_id)
                 continue
 
             # Skip HVAC devices with low/medium confidence — the scan
@@ -905,8 +909,10 @@ class DiscoveryManager:
             mismatch_desc = (
                 f"schema={schema_class_norm}, discovery={scan_type}"
             )
-            meta.class_mismatch = mismatch_desc
-            self.metadata[device_id] = meta
+            if meta.class_mismatch != mismatch_desc:
+                meta.class_mismatch = mismatch_desc
+                self.metadata[device_id] = meta
+                self._signal_metadata_change(device_id)
             mismatches.append((device_id, schema_class_norm, scan_type))
             _LOGGER.debug(
                 "DiscoveryManager: class mismatch for %s — "
@@ -949,6 +955,19 @@ class DiscoveryManager:
 
         return len(mismatches)
 
+    def _signal_metadata_change(self, device_id: str) -> None:
+        """Ask entities of this device to re-write their state.
+
+        Metadata flags (``class_mismatch`` etc.) are read from the
+        discovery manager in ``extra_state_attributes``, which HA only
+        re-evaluates when the entity writes state.  A device whose
+        packets are validation-dropped (e.g. a mis-declared ``_class``)
+        may never emit a device update, leaving the flag set but
+        invisible.  Emitting ``SIGNAL_UPDATE_<device_id>`` lets
+        subscribers refresh immediately.
+        """
+        dispatcher_send(self._hass, f"{SIGNAL_UPDATE}_{device_id}")
+
     def flag_class_mismatch(self, device_id: str, description: str) -> None:
         """Flag a device as having a class mismatch (external source).
 
@@ -967,6 +986,7 @@ class DiscoveryManager:
         if meta.class_mismatch != description:
             meta.class_mismatch = description
             self.metadata[device_id] = meta
+            self._signal_metadata_change(device_id)
             if device_id not in self._warned_mismatches:
                 _LOGGER.warning(
                     "DiscoveryManager: class mismatch for %s — %s. "
@@ -997,6 +1017,7 @@ class DiscoveryManager:
         ):
             meta.class_mismatch = None
             self.metadata[device_id] = meta
+            self._signal_metadata_change(device_id)
 
     def get_mismatched_devices(self) -> list[DiscoveredDeviceEntry]:
         """Get devices that have a class mismatch flag set.
