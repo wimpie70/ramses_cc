@@ -1780,6 +1780,9 @@ class RamsesServiceHandler:
                     # skipped/foreign devices are excluded from the
                     # derived known_list — drop any stale entry
                     known_list.pop(device_id, None)
+                _LOGGER.debug(
+                    "Runtime known_list update for %s: %s", device_id, traits
+                )
 
             add_to_include_lists(client, device_id)
 
